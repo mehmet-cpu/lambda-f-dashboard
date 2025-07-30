@@ -6,20 +6,14 @@ from firebase_admin import credentials, firestore
 from datetime import datetime
 
 
-@st.cache_resource
-def init_firebase():
+if not firebase_admin._apps:
+    secrets_dict = st.secrets["firebase_key"]
+    firebase_creds_copy = dict(secrets_dict)
+    firebase_creds_copy['private_key'] = firebase_creds_copy['private_key'].replace('\\n', '\n')
+    cred = credentials.Certificate(firebase_creds_copy)
+    firebase_admin.initialize_app(cred)
 
-    try:
-        creds = credentials.Certificate(dict(st.secrets["firebase_credentials"]))
-        firebase_admin.initialize_app(creds)
-    except Exception as e:
-
-        if not firebase_admin._apps:
-            st.error(f"Firebase could not be started. Error: {e}")
-            st.warning("Please make sure that you have configured the .streamlit/secrets.toml file correctly.")
-    return firestore.client()
-
-db = init_firebase()
+db = firestore.client()
 
 
 @st.cache_data(ttl=600)
