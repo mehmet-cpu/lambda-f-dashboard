@@ -19,34 +19,14 @@ st.set_page_config(
 # -----------------------------------------------------------------------------
 # Firebase Connection (Using Streamlit's caching mechanism)
 # -----------------------------------------------------------------------------
-@st.cache_resource
-def initialize_firebase():
-    """
-    Initializes the Firebase connection and returns the database client.
-    Thanks to st.cache_resource, this function is run only once.
-    """
-    try:
-        # Securely get Firebase credentials from Streamlit secrets
-        firebase_creds_dict = st.secrets["firebase_key"]
-        
-        # If private_key contains '\n', convert it to a real newline character
-        if 'private_key' in firebase_creds_dict:
-            firebase_creds_dict['private_key'] = firebase_creds_dict['private_key'].replace('\\n', '\n')
+if not firebase_admin._apps:
+    secrets_dict = st.secrets["firebase_key"]
+    firebase_creds_copy = dict(secrets_dict)
+    firebase_creds_copy['private_key'] = firebase_creds_copy['private_key'].replace('\\n', '\n')
+    cred = credentials.Certificate(firebase_creds_copy)
+    firebase_admin.initialize_app(cred)
 
-        cred = credentials.Certificate(firebase_creds_dict)
-
-        # Initialize the app if not already initialized
-        if not firebase_admin._apps:
-            firebase_admin.initialize_app(cred)
-            
-        return firestore.client()
-    except Exception as e:
-        st.error(f"An error occurred while initializing Firebase: {e}")
-        st.warning("Please ensure your `secrets.toml` file is configured correctly in Streamlit Cloud.")
-        return None
-
-# Get the Firebase client
-db = initialize_firebase()
+db = firestore.client()
 
 # -----------------------------------------------------------------------------
 # Data Fetching Function
