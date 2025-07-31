@@ -1,135 +1,215 @@
+# Import necessary libraries
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
+import plotly.express as px
 import firebase_admin
 from firebase_admin import credentials, firestore
 from datetime import datetime
 
+# -----------------------------------------------------------------------------
+# Page Configuration (Called only once at the beginning of the script)
+# -----------------------------------------------------------------------------
+st.set_page_config(
+    page_title="λF Risk Dashboard",
+    page_icon="🔺",
+    layout="centered",  # 'centered' provides a more focused view, 'wide' is also an option.
+    initial_sidebar_state="auto"
+)
 
-if not firebase_admin._apps:
-    secrets_dict = st.secrets["firebase_key"]
-    firebase_creds_copy = dict(secrets_dict)
-    firebase_creds_copy['private_key'] = firebase_creds_copy['private_key'].replace('\\n', '\n')
-    cred = credentials.Certificate(firebase_creds_copy)
-    firebase_admin.initialize_app(cred)
-
-db = firestore.client()
-
-
-@st.cache_data(ttl=600)
-def fetch_lambdaF_history():
-    docs = db.collection("lambdaF").order_by("timestamp", direction=firestore.Query.DESCENDING).limit(30).stream()
-    
-    data = []
-    for doc in docs:
-        doc_data = doc.to_dict()
-
-        scores = doc_data.get("source_scores", {})
+# -----------------------------------------------------------------------------
+# Firebase Connection (Using Streamlit's caching mechanism)
+# -----------------------------------------------------------------------------
+@st.cache_resource
+def initialize_firebase():
+    """
+    Initializes the Firebase connection and returns the database client.
+    Thanks to st.cache_resource, this function is run only once.
+    """
+    try:
+        # Securely get Firebase credentials from Streamlit secrets
+        firebase_creds_dict = st.secrets["firebase_key"]
         
-        data.append({
-            "timestamp": doc_data.get("timestamp"),
-            "lambda_F": doc_data.get("lambda_F"),
-            "fearAndGreed": scores.get("fearAndGreed"),
-            "redditHype": scores.get("redditHype"),
-            "volumeSpike": scores.get("volumeSpike")
-        })
-    
-    if not data:
+        # If private_key contains '\n', convert it to a real newline character
+        if 'private_key' in firebase_creds_dict:
+            firebase_creds_dict['private_key'] = firebase_creds_dict['private_key'].replace('\\n', '\n')
+
+        cred = credentials.Certificate(firebase_creds_dict)
+
+        # Initialize the app if not already initialized
+        if not firebase_admin._apps:
+            firebase_admin.initialize_app(cred)
+            
+        return firestore.client()
+    except Exception as e:
+        st.error(f"An error occurred while initializing Firebase: {e}")
+        st.warning("Please ensure your `secrets.toml` file is configured correctly in Streamlit Cloud.")
+        return None
+
+# Get the Firebase client
+db = initialize_firebase()
+
+# -----------------------------------------------------------------------------
+# Data Fetching Function
+# -----------------------------------------------------------------------------
+@st.cache_data(ttl=600)  # Cache the data for 10 minutes (600 seconds)
+def fetch_lambda_f_data(_db_client):
+    """
+    Fetches Lambda-F data from Firestore, converts it to a DataFrame, and sorts it.
+    The _db_client parameter helps the cache know when to invalidate.
+    """
+    if _db_client is None:
+        return pd.DataFrame() # Return an empty DataFrame
+        
+    try:
+        # Fetch the last 30 records in descending order to get the most recent ones
+        docs = _db_client.collection("lambdaF").order_by("timestamp", direction=firestore.Query.DESCENDING).limit(30).stream()
+        
+        data = []
+        for doc in docs:
+            doc_data = doc.to_dict()
+            data.append({
+                "timestamp": doc_data.get("timestamp"),
+                "lambda_F": doc_data.get("lambda_F"),
+                "status": doc_data.get("status", "N/A")
+            })
+        
+        if not data:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(data)
+        df = df.dropna(subset=['timestamp', 'lambda_F'])
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        # Sort values ascending to plot correctly
+        df = df.sort_values(by="timestamp", ascending=True).reset_index(drop=True)
+        return df
+
+    except Exception as e:
+        st.error(f"An error occurred while fetching data: {e}")
         return pd.DataFrame()
 
-    df = pd.DataFrame(data)
-    df = df.dropna(subset=['timestamp'])
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-    df = df.sort_values(by="timestamp", ascending=True)
-    return df
+# -----------------------------------------------------------------------------
+# Visualization Functions
+# -----------------------------------------------------------------------------
+def create_time_series_chart(df):
+    """
+    Creates an interactive time series chart with the given DataFrame.
+    """
+    if df.empty:
+        return None
 
-# --- Dashboard Arayüzü ---
-st.set_page_config(layout="wide", page_title="Lambda-F Risk Indicator")
+    fig = px.line(
+        df,
+        x='timestamp',
+        y='lambda_F',
+        title="Lambda-F Score Over Time",
+        labels={'timestamp': 'Date', 'lambda_F': 'λF Score'},
+        markers=True
+    )
 
-st.title("λF Real-Time Market Uncertainty Indicator")
-st.markdown("It aims to predict phase transitions such as crises or bubbles by measuring collective sentiment and hype in the markets.")
-
-df_history = fetch_lambdaF_history()
-
-if df_history.empty:
-    st.warning("Data could not be retrieved from Firestore or no data is available yet.")
-else:
-
-    latest_data = df_history.iloc[-1]
-    lambda_F = latest_data["lambda_F"]
-
-
-    st.markdown("---")
-    
-
-    st.header(f"Current λF Value: `{lambda_F:.3f}`")
-    if lambda_F > 0.7:
-        st.error("🚨 CRITICAL AREA: Social and market turmoil is very high. Risk of overheating.")
-    elif lambda_F > 0.5:
-        st.warning("⚠️ RISK AREA: Uncertainty and volatility risk are increasing.")
-    else:
-        st.success("✅ NORMAL LEVEL: The market appears stable.")
-
-    st.subheader("λF Component Scores (0-100)")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric(
-            label=" General Market Sentiment",
-            value=f"{latest_data['fearAndGreed']:.0f}",
-            help="Fear and Greed Index. Low values indicate fear, high values indicate greed."
-        )
-    with col2:
-        st.metric(
-            label="💬 Social Media Hype",
-            value=f"{latest_data['redditHype']:.0f}",
-            help="Social enthusiasm level based on the number of keywords on Reddit."
-        )
-    with col3:
-        st.metric(
-            label="📈 Market Activity",
-            value=f"{latest_data['volumeSpike']:.0f}",
-            help="A score that measures sudden increases in transaction volume."
-        )
-
-
-    st.markdown("---")
-    st.subheader("📊 Change in λF over Time and Contribution of Components")
-
-
-    df_history['fng_contrib'] = (df_history['fearAndGreed'] / 100) * 0.4
-    df_history['reddit_contrib'] = (df_history['redditHype'] / 100) * 0.3
-    df_history['volume_contrib'] = (df_history['volumeSpike'] / 100) * 0.3
-    
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    
-
-    ax.stackplot(
-        df_history['timestamp'],
-        df_history['fng_contrib'],
-        df_history['reddit_contrib'],
-        df_history['volume_contrib'],
-        labels=['Market Sentiment (%40)', 'Social Hype (%30)', 'Market Activity (%30)'],
-        alpha=0.7
+    # Chart styling and threshold lines
+    fig.update_layout(
+        xaxis_title="Time",
+        yaxis_title="λF Score",
+        yaxis_range=[0, 1],
+        template="plotly_white", # For a cleaner look
+        title_x=0.5 # Center the title
     )
     
-    
-    ax.plot(df_history['timestamp'], df_history['lambda_F'], color='black', linewidth=2, linestyle='--', label='Total λF Value')
+    # Threshold lines
+    fig.add_hline(y=0.7, line_dash="dot", line_color="red", annotation_text="🚨 Critical Level (0.7)", annotation_position="bottom right")
+    fig.add_hline(y=0.5, line_dash="dot", line_color="orange", annotation_text="⚠️ Risk Level (0.5)", annotation_position="bottom right")
 
+    return fig
 
-    ax.axhline(y=0.5, color='darkorange', linestyle='--', label='⚠️ Risk Threshold (0.5)')
-    ax.axhline(y=0.7, color='red', linestyle='--', label='🚨 Critical Threshold (0.7)')
-    
+# -----------------------------------------------------------------------------
+# Main Dashboard Interface
+# -----------------------------------------------------------------------------
 
-    ax.set_title("Time Series Contribution of λF Components", fontsize=16)
-    ax.set_xlabel("Time")
-    ax.set_ylabel("λF Value and Contribution")
-    ax.legend(loc='upper left')
-    ax.grid(True, alpha=0.3)
-    ax.set_ylim(0, max(1.0, df_history['lambda_F'].max() * 1.1))
+# --- Title ---
+st.title("🔺 λF Risk Dashboard")
+st.caption(f"Flux Finance | Data last updated on {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
-    st.pyplot(fig)
+# --- Fetch Data ---
+df_history = fetch_lambda_f_data(db)
+
+# --- Main Metrics ---
+if not df_history.empty:
+    # Get the latest data
+    latest_data = df_history.iloc[-1]
+    lambda_f_current = latest_data['lambda_F']
+    status_current = latest_data['status']
+
+    # Get the previous data point for comparison (if it exists)
+    lambda_f_previous = df_history.iloc[-2]['lambda_F'] if len(df_history) > 1 else 0
+    delta = lambda_f_current - lambda_f_previous
 
     st.markdown("---")
-    with st.expander("View Raw Data for the Last 30 Days"):
-        st.dataframe(df_history)
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.metric(
+            label="Current λF Score",
+            value=f"{lambda_f_current:.3f}",
+            delta=f"{delta:.3f} vs. previous day",
+            delta_color="inverse" # Positive change is red (bad), negative is green (good)
+        )
+    
+    with col2:
+        # Display a colored status text with an icon
+        if status_current == "Kritik" or status_current == "Critical":
+            st.error(f"**Status: Critical** 🚨")
+        elif status_current == "Riskli" or status_current == "Risky":
+            st.warning(f"**Status: Risky** ⚠️")
+        else:
+            st.success(f"**Status: Normal** ✅")
+    st.markdown("---")
+
+else:
+    st.warning("No historical data available to display yet. Please ensure the simulation is generating data.")
+
+
+# --- Tabbed Content Area ---
+tab1, tab2 = st.tabs(["📈 Time Series Chart", "📄 Data Table"])
+
+with tab1:
+    st.subheader("Interactive Chart of λF Scores")
+    
+    # Create and display the chart
+    time_series_chart = create_time_series_chart(df_history)
+    if time_series_chart:
+        st.plotly_chart(time_series_chart, use_container_width=True)
+    else:
+        st.info("Not enough data to draw the chart.")
+
+with tab2:
+    st.subheader("Historical λF Data (Last 30 records)")
+    
+    if not df_history.empty:
+        # Display the DataFrame in a more readable format
+        st.dataframe(
+            df_history.sort_values(by="timestamp", ascending=False),
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.info("No data table to display.")
+
+
+# --- Sidebar ---
+st.sidebar.header("About the λF Model")
+st.sidebar.info(
+    """
+    **Lambda-F (λF)** is a risk indicator that aims to predict potential instabilities 
+    and 'phase transitions' (sudden crashes or overheating) in financial markets 
+    by analyzing collective sentiment shifts on social media.
+    
+    - **0.0 - 0.5 (Normal ✅):** The market is calm.
+    - **0.5 - 0.7 (Risky ⚠️):** Uncertainty and volatility are increasing.
+    - **0.7 - 1.0 (Critical 🚨):** Social tension is high, increasing the risk of sudden and large price movements.
+    """
+)
+st.sidebar.markdown("---")
+if st.sidebar.button('Refresh Data 🔄'):
+    # Clear the cache and rerun the script to fetch new data
+    st.cache_data.clear()
+    st.rerun()
